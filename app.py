@@ -6,9 +6,9 @@ import os
 
 st.set_page_config(page_title="Dashboard Anglo", layout="wide")
 
-# --- FUNCIÓN DE CARGA AUTOMÁTICA DESDE GITHUB ---
-def cargar_datos(palabra_clave):
-    # Busca en la carpeta del servidor
+# --- FUNCIÓN DE CARGA SIMPLE (SOLO EXCEL) ---
+def cargar_excel(palabra_clave):
+    # Busca archivos Excel con la palabra clave
     archivos = glob.glob(f"*{palabra_clave}*.xlsx")
     if not archivos: return pd.DataFrame(), False
     
@@ -16,38 +16,68 @@ def cargar_datos(palabra_clave):
     archivo_mas_nuevo = max(archivos, key=os.path.getctime)
     try:
         return pd.read_excel(archivo_mas_nuevo, engine='openpyxl'), True
-    except:
+    except Exception as e:
         return pd.DataFrame(), False
 
-# --- CARGA ---
-df_docs, hay_docs = cargar_datos("Docs")
-df_flujo, hay_flujo = cargar_datos("Flujo")
-df_hist, hay_hist = cargar_datos("Historial")
+# --- CARGAMOS TUS 3 ARCHIVOS ---
+df_docs, ok_docs = cargar_excel("Docs")      # El real de Aconex
+df_flujo, ok_flujo = cargar_excel("Flujo")   # El que creamos
+df_hist, ok_hist = cargar_excel("Historial") # El que creamos
 
-if not hay_docs:
-    st.error("⚠️ Sincronizando datos... Espera unos segundos o sube el reporte 'Docs' a la carpeta.")
+if not ok_docs:
+    st.error("⚠️ Error: No encuentro el Excel 'Docs'.")
     st.stop()
 
 # --- PROCESAMIENTO ---
+# Extraemos el contrato (CP...)
 if 'Contrato' in df_docs.columns:
     df_docs['Contrato_Corto'] = df_docs['Contrato'].astype(str).str.split('-').str[0]
 else:
     df_docs['Contrato_Corto'] = "General"
 
-# --- DASHBOARD ---
-st.title(f"🏗️ Dashboard Anglo - {len(df_docs)} Documentos")
-st.markdown("Datos sincronizados automáticamente del servidor.")
+# --- INTERFAZ ---
+st.title(f"🏗️ Dashboard Control Documental")
 
-# Filtros y Pestañas (Tu lógica estándar)
+# Filtro de Contrato
 lista = sorted(df_docs['Contrato_Corto'].unique().tolist())
 lista.insert(0, "Todos")
-sel = st.sidebar.selectbox("Contrato:", lista)
+sel = st.sidebar.selectbox("Seleccionar Contrato:", lista)
 
-df_view = df_docs[df_docs['Contrato_Corto'] == sel] if sel != "Todos" else df_docs
+# Función de filtrado
+def filtrar(df):
+    if df.empty or sel == "Todos": return df
+    # Busca columnas que contengan 'contrato'
+    col = next((c for c in df.columns if 'contrato' in c.lower()), None)
+    return df[df[col].astype(str).str.contains(sel, na=False)] if col else df
 
-c1, c2, c3 = st.columns(3)
-c1.metric("Total", len(df_view))
-aprobados = len(df_view[df_view['Estatus'].astype(str).str.contains('Aprobado|Proceed', case=False)])
-c2.metric("✅ Aprobados", aprobados)
+df_v = filtrar(df_docs)
+df_f = filtrar(df_flujo)
+df_h = filtrar(df_hist)
 
-st.dataframe(df_view, use_container_width=True)
+# --- PESTAÑAS ---
+t1, t2, t3 = st.tabs(["📊 General", "🔥 Pendientes", "⏱️ Historial"])
+
+with t1:
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Docs", len(df_v))
+    aprobados = len(df_v[df_v['Estatus'].astype(str).str.contains('Aprobado|Proceed', case=False, na=False)])
+    c2.metric("✅ Aprobados", aprobados)
+    rechazados = len(df_v[df_v['Estatus'].astype(str).str.contains('Rechazado|No Proceder', case=False, na=False)])
+    c3.metric("❌ Rechazados", rechazados)
+    
+    st.dataframe(df_v, use_container_width=True)
+
+with t2:
+    if not ok_flujo: st.warning("Falta archivo Flujo")
+    else:
+        vencidos = df_f[df_f['Días de Retraso'] > 0]
+        st.metric("🔴 Documentos Vencidos", len(vencidos))
+        st.dataframe(df_f, use_container_width=True)
+
+with t3:
+    if not ok_hist: st.warning("Falta archivo Historial")
+    else:
+        prom = df_h['Días Gestión'].mean()
+        st.metric("Tiempo Promedio (Días)", f"{prom:.1f}")
+        fig = px.histogram(df_h, x="Días Gestión", title="Distribución de Tiempos")
+        st.plotly_chart(fig, use_container_width=True)
